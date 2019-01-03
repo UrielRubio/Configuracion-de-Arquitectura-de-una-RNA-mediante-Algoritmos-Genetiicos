@@ -1,0 +1,322 @@
+---
+title: Feature Selection
+subtitle: GA and ANN
+runtime: shiny
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+MODIFICAR DIRECTORIOS A CONVENIENCIA
+Directorios para tomar dataset y guadar modelos y dataset
+```{r directories}
+#Para tomar el dataset preprocesado de acuerdo a (namsrai et. al., 2013)
+wdDataset <- "E:/Documentos/Maestría en Sistemas Computacionales/Nueva Tesis/Experimentos/03--27-Nov-17/Datasets/"
+#Directorio donde AG guarda los mejores modelos (cromosoma, arquitectura, etc.) en clasificacion binaria
+wdModelosANN_Bin <- "E:/Documentos/Maestría en Sistemas Computacionales/Nueva Tesis/Experimentos/03--27-Nov-17/Modelos/ANN/Bin/"
+#Directorio donde AG guarda los mejores modelos (cromosoma, arquitectura, etc.) en clasificacion multi-clase
+wdModelosANN_Multi <- "E:/Documentos/Maestría en Sistemas Computacionales/Nueva Tesis/Experimentos/03--27-Nov-17/Modelos/ANN/MultiClase/"
+```
+Librerías necesarias para el funcionamiento
+```{r libraries}
+library(genalg)
+library(neuralnet)
+library(ggplot2)
+library(caTools)
+set.seed(123)
+library(hms)
+```
+# Otras funciones necesarias
+## Decodificar cromosoma
+Recordemos que las partes del cromosomas son:
+El cromosoma se conforma de las partes siguientes
+1- proporcion de division del dataset 1-3 (60, 70, 80)
+- numero de capas ocultas 1-3
+- neuronas en capa oculta 1 minNeuronsPorCapa <- 100-maxNeuronsPorCapa
+- neuronas en capa oculta 2
+- neuronas en capa oculta 3
+- epocas minEpocas-maxEpocas
+- tasa de aprendizaje 0.2-0.5
+```{r decodificar}
+decodificarCromosoma <- function(x){
+# # 1- proporcion de division del dataset 1-3 (60, 70, 80)
+  prop <- as.integer(x[1])
+  ifelse(prop==1,
+       x[1] <- 1,
+       ifelse(prop==2,
+       x[1] <- 2,
+       x[1] <- 3
+       )
+  )
+# # - numero de capas ocultas 1-3
+# # - neuronas en capa oculta 1 minNeuronsPorCapa <- 100-maxNeuronsPorCapa
+# # - neuronas en capa oculta 2
+# # - neuronas en capa oculta 3
+# # - epocas minEpocas-maxEpocas
+#   print(class(x[c(2:6)]))
+   x[c(2:6)] <- as.integer(x[c(2:6)])
+# # - tasa de aprendizaje 0.2-0.5
+  x[7] <- round(x[7], 2) 
+  return(as.numeric(x))
+}
+
+
+```
+
+
+
+## Categorizar las clases `Classification` para comparar resultados con cada neurona en la capa de salida
+```{r Categorizar}
+# Categorical data 
+CategoricalData <- function(X, number.of.classes){
+  result <- as.data.frame(matrix(0, nrow = length(X), ncol = number.of.classes))
+  names(result) <- paste("C", 1:number.of.classes, sep = "")
+   for(i in 1:length(X)){
+     result[i,(X[i]+1)] <- 1
+   }
+  return(result)
+}
+# Reverse Categorical data
+ReverseCategoricalData <- function(X){
+  res <- NULL
+  for( i in 1:nrow( X ) ){
+    res <- c(res, which(X[ i, ]==max(X[ i, ]))[1]-1)
+  }
+  return(res)
+}
+```
+## Datasets
+Armamos el dataset en una lista
+### Cargar dataset
+utilizamos el dataset normalizado
+```{r dataset}
+setwd(wdDataset)
+dataset <- read.csv("Namsrai_1_dataset_scaled.csv")
+```
+### Divisiones
+Divide los datos en la proporcion indicada para entrenamiento-prueba, además prepara los datos en el formato aceptado por la función neuralnet
+```{r dividir}
+dividirDataset <- function(proporcion){
+  # Clase 0
+  pos_clase <- which((dataset$Classification==0)==T)
+  split <- sample.split(pos_clase, SplitRatio = proporcion)
+  # para primer clasificador
+  pos_entrenamiento_bin <- subset(pos_clase, split==TRUE)
+  pos_prueba_bin <- subset(pos_clase, split==FALSE)
+  
+  # Clase 2-7
+  pos_entrenamiento_multi <- NULL
+  pos_prueba_multi <- NULL
+  for(i in 1:7){
+    pos_clase <- which((dataset$Classification==i)==T)
+    split <- sample.split(pos_clase, SplitRatio = proporcion)
+    # para primer clasificador
+    pos_entrenamiento_bin <- c(pos_entrenamiento_bin,
+                               subset(pos_clase, split==TRUE))
+    pos_prueba_bin <- c(pos_prueba_bin, 
+                    subset(pos_clase, split==FALSE))
+    # para segundo clasificador
+    pos_entrenamiento_multi <- c(pos_entrenamiento_multi, 
+                                 subset(pos_clase, split==TRUE))
+    pos_prueba_multi <- c(pos_prueba_multi, 
+                          subset(pos_clase, split==FALSE))
+  }
+  # Mezclar los regsitros
+  # para primer clasificador
+  pos_entrenamiento_bin <- sample(pos_entrenamiento_bin, 
+                                length(pos_entrenamiento_bin),
+                                replace = F)
+  pos_prueba_bin <- sample(pos_prueba_bin, 
+                                length(pos_prueba_bin),
+                                replace = F)
+  # para segundo clasificador
+  pos_entrenamiento_multi <- sample(pos_entrenamiento_multi, 
+                                length(pos_entrenamiento_multi),
+                                replace = F)
+  pos_prueba_multi <- sample(pos_prueba_multi, 
+                                length(pos_prueba_multi),
+                                replace = F)
+  #cat(length(pos_entrenamiento_bin),"\n", length(pos_prueba_bin), "\n", length(pos_entrenamiento_multi), "\n", length(pos_prueba_multi), "\n")
+  #Binarizar las clases
+  clasesMulti <- dataset$Classification
+  clasesBin <- dataset$Classification
+  for(i in 1:length(clasesBin))
+    if(clasesBin[i]>0)
+      clasesBin[i] <- 1
+  #Categorizar las clases y calcular formula
+  datasetCategorico_Bin <- data.frame(cbind(
+    dataset[, -nrow(dataset)], CategoricalData(clasesBin, 2) 
+  ))
+  f_Bin <-  as.formula(paste(paste(names(CategoricalData(clasesBin, 2)), collapse = " + "), " ~ ", paste(names(dataset)[-ncol(dataset)], collapse = " + ")))
+  datasetCategorico_Multi <- data.frame(cbind(
+    dataset[, -nrow(dataset)], CategoricalData(clasesMulti, 8) 
+  ))
+  f_Multi <-  as.formula(paste(paste(names(CategoricalData(clasesMulti, 8)), collapse = " + "), " ~ ", paste(names(dataset)[-ncol(dataset)], collapse = " + ")))
+  #print(f_Bin)
+  #View(datasetCategorico_Multi)
+  # Armar los dataset
+  return(list(
+    datasetCompleto = list(
+      entrenamiento = list(
+        binario = list(
+          dataset = datasetCategorico_Bin[pos_entrenamiento_bin, ],
+          clases = clasesBin[pos_entrenamiento_bin],
+          formula = f_Bin
+        ),
+        multiClase =list(
+          dataset = datasetCategorico_Multi[pos_entrenamiento_bin, ],
+          clases = clasesMulti[pos_entrenamiento_bin],
+          formula = f_Multi
+        )
+      ),
+      prueba = list(
+        binario = list(
+          dataset = dataset[pos_prueba_bin, -ncol(dataset)],
+          clases = clasesBin[pos_prueba_bin],
+          formula = f_Bin
+        ),
+        multiClase =list(
+          dataset = dataset[pos_prueba_bin, -ncol(dataset)],
+          clases = clasesMulti[pos_prueba_bin],
+          formula = f_Multi
+        )
+      )
+    ),
+    datasetSoloArritmias = list(
+      entrenamiento = list(
+        multiClase =list(
+          dataset = datasetCategorico_Multi[pos_entrenamiento_multi, ],
+          clases = clasesMulti[pos_entrenamiento_multi],
+          formula = f_Multi
+        )
+      )
+    )
+  ))
+}
+```
+Armamos el dataset en una lista que contiene las proporciones de muestreo de datos para entrenamiento-prueba indicadas en la tesis
+```{r crearLista}
+data <- list(
+  proporcion60 = dividirDataset(500/809), 
+  proporcion70 = dividirDataset(0.7), 
+  proporcion80 = dividirDataset(0.8)
+)
+```
+
+
+
+## NeuralNet
+Ejecutamos la red neuronal feed-fordward con 
+```{r neuralnet}
+library(neuralnet)
+ANN <- function(f, datasetTraining, hidden, epocas, learningrate, datasetTest, clasesTest){
+  
+  #cat("datasetTrai", dim(datasetTraining), "datasetTest", dim(datasetTest), " ocultas ", hidden, " epocas ", epocas, " tasa aprend. ", learningrate, "\n")
+  # Time the model
+  ini <- as.hms(Sys.time())
+  #entrenamiento
+  ann <- neuralnet(f, data = datasetTraining, hidden = hidden, lifesign="minimal", rep = epocas, threshold = 0.5, stepmax = 10000, learningrate = learningrate)
+  # Time the model
+  tiempo <- as.hms(as.hms(Sys.time()) - ini)
+  print(tiempo)
+  #clasificar
+  clasificacion_ANN_bin <- compute(ann, datasetTest)
+  clasificacion_ANN_bin <- ReverseCategoricalData(clasificacion_ANN_bin$net.result)
+  # Matriz de confusion
+  library("caret")
+  matriz_Confusion <- confusionMatrix(clasificacion_ANN_bin, 
+                                    clasesTest)
+  #print(matriz_Confusion)
+  return(list(
+    modelo = ann,
+    exactitud = matriz_Confusion$overall[1], 
+    matrizConfusion = matriz_Confusion,
+    datasetTraining = datasetTraining, 
+    datasetTest = datasetTest, 
+    clasesTest = clasesTest
+    )
+  ) #regresamos accuracy (exactitud)
+}
+
+```
+
+# GA
+## Función de evaluación
+```{r GA_funcionEval}
+evalFunc <- function(x) {
+  xDec <- decodificarCromosoma(x)
+  # Obtener los datos
+  datos <- data[[xDec[1]]]$datasetCompleto
+  # Obtener el numero de neuronas por capa oculta
+  capasOcultas <- xDec[3:5][1:xDec[2]]
+  cat(x,"\n", xDec, " hidden=", capasOcultas, " calificación ", sum(x), " ", class(xDec),"\n" )
+  #Ejecutar la RNA
+  resANN <- ANN(f = datos$entrenamiento$multiClase$formula, 
+      datasetTraining = datos$entrenamiento$multiClase$dataset, 
+      hidden = capasOcultas, epocas = xDec[6], learningrate = xDec[7], 
+      datasetTest = datos$prueba$multiClase$dataset, 
+      clasesTest = datos$prueba$multiClase$clases
+      )
+  if(-resANN$exactitud < mejor){
+    assign("mejor", -resANN$exactitud, envir = .GlobalEnv)
+    assign("mejorChromosoma", x, envir = .GlobalEnv)
+    #Guardar el modelo
+    #setwd(wdModelosANN_Bin)
+    setwd(wdModelosANN_Multi)
+    nombre <- paste(paste("Accu", round(resANN$exactitud, 4), "Split", xDec[1], "Chrom", paste(as.character(xDec), collapse = " "), "Bin", sep = "_" ), "rds", sep  = ".")
+    print(nombre)
+    #Guardar mejor cromosoma
+    saveRDS(resANN, nombre)
+  }
+  return(-resANN$exactitud)
+}
+```
+## Construcción del modelo
+### Cromosoma
+El cromosoma se conforma de las partes siguientes
+1- proporcion de division del dataset 1-3 (60, 70, 80)
+- numero de capas ocultas 1-3
+- neuronas en capa oculta 1 minNeuronsPorCapa <- 100-maxNeuronsPorCapa
+- neuronas en capa oculta 2
+- neuronas en capa oculta 3
+- epocas minEpocas-maxEpocas
+- tasa de aprendizaje 0.2-0.5
+```{r buildChromosome}
+minNeuronsPorCapa <- 5
+maxNeuronsPorCapa <- 50
+minEpocas <- 10
+maxEpocas <- 50
+stringMin <- c(1, 1, rep(minNeuronsPorCapa, 3 ), minEpocas, 0.2)
+stringMax <- c(3.9, 3.9, rep(maxNeuronsPorCapa, 3), maxEpocas, 0.5)
+```
+
+### Modelo
+```{r modelo}
+#Monitor me permito visualizar gráficamente el desempeño de AG durante su ejecución
+monitor <- function(obj) {
+    # plot the population
+    # xlim = c(obj$stringMin[1], obj$stringMax[1]);
+    # ylim = c(obj$stringMin[2], obj$stringMax[2]);
+    xlim = c(0, 1);
+    ylim = c(0, 1);
+    plot(-obj$best);
+}
+generaciones = 20
+mejorChromosoma <- NULL
+mejor <- 10000
+# Time the model
+ini <- as.hms(Sys.time())
+# Iniciar GA
+GAmodel <- rbga(stringMin=stringMin, stringMax=stringMax, popSize = 135, iters = generaciones, mutationChance = 0.01, elitism = T, evalFunc = evalFunc, monitorFunc = monitor)
+# Time the model
+tiempo <- as.hms(as.hms(Sys.time()) - ini)
+cat(summary(GAmodel))
+cat("el mejor es ", mejorChromosoma,"\n", decodificarCromosoma(mejorChromosoma), " con calificación ", -mejor, "\n")
+tiempo
+plot(GAmodel)
+```
+

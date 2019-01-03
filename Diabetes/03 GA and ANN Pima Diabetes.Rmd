@@ -1,0 +1,327 @@
+---
+title: Find the best architecture of an ANN
+subtitle: GA and ANN Pima Diabetes
+runtime: shiny
+output: 
+  html_document:
+    theme: cosmo
+    toc: TRUE
+    toc_float: TRUE
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+MODIFICAR DIRECTORIOS A CONVENIENCIA
+Directorios para tomar dataset y guadar modelos y dataset
+```{r directories}
+#Para tomar el dataset original
+wdDataset <- "E:/Documentos/Maestría en Sistemas Computacionales/Nueva Tesis/DataSet/Diabetes/Pima Indians Diabetes/"
+#Para guardar el dataset preprocesado
+wdDatasetPrepro <- "E:/Documentos/Maestría en Sistemas Computacionales/Nueva Tesis/Experimentos/04--08-Dic-17/Datasets/"
+#Directorio donde AG guarda los mejores modelos (cromosoma, arquitectura, etc.)
+wdModelosANN <- "E:/Documentos/Maestría en Sistemas Computacionales/Nueva Tesis/Experimentos/04--08-Dic-17/Modelos/ANN Pima Diabetes/"
+```
+Librerías necesarias para el funcionamiento
+```{r libraries}
+library(genalg)
+library(neuralnet)
+library(ggplot2)
+library(caTools)
+set.seed(123)
+library(hms)
+library(modeest)
+```
+# Preprocesamiento del dataset
+## Cargar dataset diabetes
+```{r cargarDataset}
+setwd(wdDataset)
+dataset <- read.csv("pima-indians-diabetes.csv")
+```
+
+
+##Datos perdidos
+Los datos perdidos se respresentann con 0
+```{r datosPerdidos}
+# #Glucosa
+# pos <- which((dataset$Plasma.glucose.concentration==0)==T)
+# dataset <- dataset[-pos,]
+# #Body.mass.index
+# pos <- which((dataset$Body.mass.index==0)==T)
+# dataset <- dataset[-pos,]
+# #Triceps.skin.fold.thickness
+# pos <- which((dataset$Triceps.skin.fold.thickness==0)==T)
+# dataset <- dataset[-pos,]
+# # Diastolic.blood.pressure
+# a <- 1
+# for(i in 1:nrow(dataset)){
+#   if(dataset$Diastolic.blood.pressure[i]==0){
+#     cat(a, "\n")
+#     a <- a+1
+#   }
+# }
+```
+## Salvar el dataset
+```{r salvarDataset}
+setwd(wdDatasetPrepro)
+write.csv(x = dataset,file = "pima-indians-diabetes.csv", row.names = F)
+```
+
+
+# Otras funciones necesarias
+## Decodificar cromosoma
+Recordemos que las partes del cromosomas son:
+El cromosoma se conforma de las partes siguientes
+1- proporcion de division del dataset 1-3 (60, 70, 80)
+- numero de capas ocultas 1-3
+- neuronas en capa oculta 1 minNeuronsPorCapa <- 100-maxNeuronsPorCapa
+- neuronas en capa oculta 2
+- neuronas en capa oculta 3
+- epocas minEpocas-maxEpocas
+- tasa de aprendizaje 0.2-0.5
+```{r decodificar}
+decodificarCromosoma <- function(x){
+# # 1- proporcion de division del dataset 1-3 (60, 70, 80)
+  prop <- as.integer(x[1])
+  ifelse(prop==1,
+       x[1] <- 1,
+       ifelse(prop==2,
+       x[1] <- 2,
+       x[1] <- 3
+       )
+  )
+# # - numero de capas ocultas 1-3
+# # - neuronas en capa oculta 1 minNeuronsPorCapa <- 100-maxNeuronsPorCapa
+# # - neuronas en capa oculta 2
+# # - neuronas en capa oculta 3
+# # - epocas minEpocas-maxEpocas
+#   print(class(x[c(2:6)]))
+   x[c(2:6)] <- as.integer(x[c(2:6)])
+# # - tasa de aprendizaje 0.2-0.5
+  x[7] <- round(x[7], 2) 
+  return(as.numeric(x))
+}
+
+
+```
+
+
+
+## Categorizar las clases `Classification` para comparar resultados con cada neurona en la capa de salida
+```{r Categorizar}
+# Categorical data 
+CategoricalData <- function(X){
+  result <- as.data.frame(matrix(0, nrow = length(X), ncol = length(unique(X))))
+  names(result) <- paste("C", 1:length(unique(X)), sep = "")
+   for(i in 1:length(X)){
+     result[i,(X[i]+1)] <- 1
+   }
+  return(result)
+}
+# Reverse Categorical data
+ReverseCategoricalData <- function(X){
+  res <- NULL
+  for( i in 1:nrow( X ) ){
+    res <- c(res, which(X[ i, ]==max(X[ i, ]))[1]-1)
+  }
+  return(res)
+}
+```
+## Datasets Heart Disease
+
+### Normalizar Heart Diseases dataset
+utilizamos el dataset normalizado
+
+```{r normalizar}
+normalizar <- function(data){
+  maximos <- apply(X = data, MARGIN = 2, max)
+  minimos <- apply(X = data, MARGIN = 2, min)
+  for(i in 1:ncol(data)){
+    data[,i] <- (data[,i]-minimos[i])/(maximos[i]-minimos[i])
+  }
+  return(data)
+}
+num <- dataset$Class
+dataset <- normalizar(dataset[,-ncol(dataset)])
+```
+### Divisiones
+Divide los datos en la proporcion indicada para entrenamiento-prueba, además prepara los datos en el formato aceptado por la función neuralnet
+```{r dividir}
+dividirDataset <- function(proporcion){
+  pos_entrenamiento <- NULL
+  pos_prueba <- NULL
+  for(i in 0:(length(unique(num))-1)){
+    pos_clase <- which(num==i)
+    #print(pos_clase)
+    split <- sample.split(pos_clase, SplitRatio = proporcion)
+    pos_entrenamiento <- c(pos_entrenamiento, subset(x = pos_clase, split == T))
+    pos_prueba <- c(pos_prueba, subset(x = pos_clase, split == F))
+  }
+  #Categorizar las clases
+  clases <- CategoricalData(num)
+  #print(clases)
+  f <- as.formula(paste(paste(names(clases), collapse = " + "), " ~ ", paste(names(dataset), collapse = " + ")))
+  # Mezlar los registros
+  pos_entrenamiento <- sample(x = pos_entrenamiento, size = length(pos_entrenamiento), replace = F)
+  pos_prueba <- sample(x = pos_prueba, size = length(pos_prueba), replace = F)
+  #print(pos_entrenamiento)
+  #print(pos_prueba)
+  return(
+    dataset = list(
+      entrenamiento = list(
+        dataset = data.frame(cbind(dataset[pos_entrenamiento, ], clases[pos_entrenamiento, ])),
+        clases = num[pos_entrenamiento],
+        formula = f
+      ),
+      prueba = list(
+        dataset = dataset[pos_prueba, ],
+        clases = num[pos_prueba],
+        formula = f
+      )
+    )
+  )
+}
+```
+Armamos el dataset en una lista que contiene las proporciones de muestreo de datos para entrenamiento-prueba indicadas en la tesis
+```{r crearLista}
+data <- list(
+  proporcion60 = dividirDataset(500/809), 
+  proporcion70 = dividirDataset(0.7), 
+  proporcion80 = dividirDataset(0.8)
+)
+```
+
+
+
+## NeuralNet
+Ejecutamos la red neuronal feed-fordward con 
+```{r neuralnet}
+library(neuralnet)
+ANN <- function(f, datasetTraining, hidden, epocas, learningrate, datasetTest, clasesTest){
+  # 
+  # print("frm=")
+  # print(f)
+  # print("datasetTrin=")
+  # print(dim(datasetTraining))
+  # print(" hidden=")
+  # print(hidden)
+  # print(" epocas=")
+  # print(epocas)
+  # print(" learnngRate=")
+  # print(learningrate)
+  # print(" dataseTest=")
+  # print(dim(datasetTest))
+  # print(" clasesTest=")
+  # print(clasesTest)
+  
+  #Time the model
+  ini <- as.hms(Sys.time())
+  #Entrenamiento
+  ann <- neuralnet(f, data = datasetTraining, hidden = hidden, lifesign="minimal", rep = epocas, threshold = 0.5, stepmax = 10000, learningrate = learningrate)
+  # Time the model
+  tiempo <- as.hms(as.hms(Sys.time()) - ini)
+  print(tiempo)
+  #clasificar
+  clasificacion_ANN_bin <- compute(ann, datasetTest)
+  #print(clasificacion_ANN_bin$net.result)
+  clasificacion_ANN_bin <- ReverseCategoricalData(clasificacion_ANN_bin$net.result)
+  #print(clasificacion_ANN_bin)
+  # Matriz de confusion
+  library("caret")
+  matriz_Confusion <- confusionMatrix(clasificacion_ANN_bin, 
+                                    clasesTest)
+  #print(matriz_Confusion)
+  return(list(
+    modelo = ann,
+    exactitud = matriz_Confusion$overall[1], 
+    matrizConfusion = matriz_Confusion,
+    datasetTraining = datasetTraining, 
+    datasetTest = datasetTest, 
+    clasesTest = clasesTest
+    )
+  ) #regresamos accuracy (exactitud)
+}
+
+```
+
+# GA
+## Función de evaluación
+```{r GA_funcionEval}
+evalFunc <- function(x) {
+  xDec <- decodificarCromosoma(x)
+  # Obtener los datos
+  datos <- data[[xDec[1]]]
+  # Obtener el numero de neuronas por capa oculta
+  capasOcultas <- xDec[3:5][1:xDec[2]]
+  cat(x,"\n", xDec, " hidden=", capasOcultas,"\n")
+  #Ejecutar la RNA
+  resANN <- ANN(f = datos$entrenamiento$formula, 
+      datasetTraining = datos$entrenamiento$dataset, 
+      hidden = capasOcultas, epocas = xDec[6], learningrate = xDec[7], 
+      datasetTest = datos$prueba$dataset, 
+      clasesTest = datos$prueba$clases
+      )
+  cat("\ncalificación ", round(resANN$exactitud, 4),"\n" )
+  #Guardar mejor cromosoma
+  if(-round(resANN$exactitud, 4) < mejor){
+    assign("mejor", -round(resANN$exactitud, 4), envir = .GlobalEnv)
+    assign("mejorChromosoma", x, envir = .GlobalEnv)
+    #Guardar el modelo
+    #setwd(wdModelosANN_Bin)
+    setwd(wdModelosANN)
+    nombre <- paste(paste("Accu", round(resANN$exactitud, 4), "Split", xDec[1], "Chrom", paste(as.character(xDec), collapse = " "), sep = "_" ), "rds", sep  = ".")
+    print(nombre)
+    #Guardar modelo en el directorio establecido
+    saveRDS(resANN, nombre)
+  }
+  return(-round(resANN$exactitud, 4))
+}
+```
+## Construcción del modelo
+### Cromosoma
+El cromosoma se conforma de las partes siguientes
+1- proporcion de division del dataset 1-3 (60, 70, 80)
+- numero de capas ocultas 1-3
+- neuronas en capa oculta 1 minNeuronsPorCapa <- 100-maxNeuronsPorCapa
+- neuronas en capa oculta 2
+- neuronas en capa oculta 3
+- epocas minEpocas-maxEpocas
+- tasa de aprendizaje 0.2-0.5
+```{r buildChromosome}
+minNeuronsPorCapa <- 5
+maxNeuronsPorCapa <- 50
+minEpocas <- 10
+maxEpocas <- 50
+stringMin <- c(1, 1, rep(minNeuronsPorCapa, 3), minEpocas, 0.2)
+stringMax <- c(3.9, 3.9, rep(maxNeuronsPorCapa, 3), maxEpocas, 0.5)
+```
+
+### Modelo
+```{r modelo}
+#Monitor me permito visualizar gráficamente el desempeño de AG durante su ejecución
+monitor <- function(obj) {
+    # plot the population
+    # xlim = c(obj$stringMin[1], obj$stringMax[1]);
+    # ylim = c(obj$stringMin[2], obj$stringMax[2]);
+    xlim = c(0, 1);
+    ylim = c(0, 1);
+    plot(-obj$best, type = "l");
+}
+#Determinar parametros de AG
+generaciones = 20
+mejorChromosoma <- NULL
+mejor <- 10000
+# Time the model
+ini <- as.hms(Sys.time())
+#Iniciar AG
+GAmodel <- rbga(stringMin=stringMin, stringMax=stringMax, popSize = 135, iters = generaciones, mutationChance = 0.01, elitism = T, evalFunc = evalFunc, monitorFunc = monitor)
+# Time the model
+tiempo <- as.hms(as.hms(Sys.time()) - ini)
+cat(summary(GAmodel))
+cat("el mejor es ", mejorChromosoma,"\n", decodificarCromosoma(mejorChromosoma), " con calificación ", -mejor, "\n")
+tiempo
+plot(GAmodel)
+setwd(wdModelosANN)
+#Guardar modelo que contiene datos de AG y la mejor arquitectura de RNA
+saveRDS(object = GAmodel, "GAmodel 1.rds")
+```
+
